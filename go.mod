@@ -1,4 +1,4 @@
-module gosplit
+module github.com/DropFan/gosplit
 
 go 1.26.4
 

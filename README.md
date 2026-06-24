@@ -17,9 +17,7 @@ makes it trustworthy.
 ## Install
 
 ```bash
-cd /path/to/gosplit
-go install .
-# gosplit is then available from any project directory
+go install github.com/DropFan/gosplit@latest
 ```
 
 ## Usage
