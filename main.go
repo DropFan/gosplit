@@ -25,6 +25,9 @@
 //	(*Store).Flush flush.go          # methods may use Type.Method form
 //	Set            write.go
 //
+// With -with-methods, mapping a type also pulls its methods and New<T>/new<T>
+// constructors into the same file unless they are explicitly mapped elsewhere.
+//
 // Declarations not listed anywhere stay in the "remainder" file, which keeps
 // the same name as the source and retains the package doc comment.
 package main
@@ -58,6 +61,7 @@ func run(args []string) error {
 	outDir := fs.String("out", "", "output directory (default: directory of the source file)")
 	dryRun := fs.Bool("dry-run", false, "print the plan and verification result, write nothing")
 	noFormat := fs.Bool("no-format", false, "do not run goimports-style import cleanup on outputs")
+	withMethods := fs.Bool("with-methods", false, "a mapped type's methods and New<T> constructors follow it")
 	verbose := fs.Bool("v", false, "verbose output")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: gosplit [-map FILE | -move NAMES -to FILE] [flags] source.go")
@@ -76,13 +80,14 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	opts := splitOpts{withMethods: *withMethods}
 
 	dir := *outDir
 	if dir == "" {
 		dir = filepath.Dir(srcPath)
 	}
 
-	plan, err := split(srcPath, mapping)
+	plan, err := split(srcPath, mapping, opts)
 	if err != nil {
 		return err
 	}
@@ -183,6 +188,11 @@ type fileOut struct {
 	declCount int
 }
 
+// splitOpts controls optional split behavior.
+type splitOpts struct {
+	withMethods bool // a mapped type's methods and New<T>/new<T> constructors follow it
+}
+
 type splitPlan struct {
 	files     map[string]*fileOut
 	unmapped  []string
@@ -195,7 +205,7 @@ type splitPlan struct {
 
 // split parses the source and produces the per-file output bytes in memory,
 // then verifies that the output declarations match the input declarations.
-func split(srcPath string, mapping map[string]string) (*splitPlan, error) {
+func split(srcPath string, mapping map[string]string, opts splitOpts) (*splitPlan, error) {
 	src, err := os.ReadFile(srcPath)
 	if err != nil {
 		return nil, err
@@ -249,6 +259,25 @@ func split(srcPath string, mapping map[string]string) (*splitPlan, error) {
 		buckets[target] = append(buckets[target], c)
 	}
 
+	// With -with-methods, a mapped type's methods and New<T>/new<T> constructors
+	// follow it unless explicitly mapped. Precompute type name -> target file.
+	typeTargets := map[string]string{}
+	if opts.withMethods {
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				if ts, ok := spec.(*ast.TypeSpec); ok {
+					if t, ok := mapping[ts.Name.Name]; ok {
+						typeTargets[ts.Name.Name] = t
+					}
+				}
+			}
+		}
+	}
+
 	for _, d := range f.Decls {
 		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.IMPORT {
 			continue
@@ -257,11 +286,20 @@ func split(srcPath string, mapping map[string]string) (*splitPlan, error) {
 		inNames = append(inNames, canonical)
 
 		target, matchedKey, mapped := lookup(mapping, keys)
-		if mapped {
+		switch {
+		case mapped:
 			matchedKeys[matchedKey] = true
-		} else {
-			target = remainder
-			unmapped = append(unmapped, canonical)
+		default:
+			ft := ""
+			if opts.withMethods {
+				ft = followTarget(d, typeTargets)
+			}
+			if ft != "" {
+				target = ft
+			} else {
+				target = remainder
+				unmapped = append(unmapped, canonical)
+			}
 		}
 
 		startPos := d.Pos()
@@ -395,6 +433,26 @@ func recvTypeName(e ast.Expr) string {
 		return recvTypeName(t.X)
 	case *ast.IndexListExpr: // generic receiver: T[P, Q]
 		return recvTypeName(t.X)
+	}
+	return ""
+}
+
+// followTarget returns the file a method or New<T>/new<T> constructor should
+// follow to, given the precomputed type->target map; "" if it follows nothing.
+func followTarget(d ast.Decl, typeTargets map[string]string) string {
+	fn, ok := d.(*ast.FuncDecl)
+	if !ok {
+		return ""
+	}
+	if fn.Recv != nil && len(fn.Recv.List) > 0 {
+		return typeTargets[recvTypeName(fn.Recv.List[0].Type)]
+	}
+	for _, prefix := range []string{"New", "new"} {
+		if t, ok := strings.CutPrefix(fn.Name.Name, prefix); ok {
+			if target, found := typeTargets[t]; found {
+				return target
+			}
+		}
 	}
 	return ""
 }

@@ -58,6 +58,16 @@ A method (one with a receiver) can be written as the bare name `M` or in a
 qualified form `T.M` / `(*T).M`; when methods of the same name belong to
 different types, use a qualified form to pin it down.
 
+**Make methods follow their type**: add `-with-methods`, and when you map a
+type, all its methods and its `New<T>` / `new<T>` constructors follow it into
+the same file by default; if you map a particular method elsewhere, your
+explicit mapping wins (handy for spreading a method-heavy type across files).
+
+```bash
+# Store's methods and NewStore follow it to store.go; but Set is sent to write.go
+gosplit -map split.txt -with-methods store.go
+```
+
 ### 2. Move mode (`-move` + `-to`)
 
 Best for "move these few out, leave the rest in place".
@@ -100,6 +110,7 @@ dry-run: nothing written
 | `-map FILE` | mapping file |
 | `-move NAMES` | comma-separated declaration names to move out (with `-to`) |
 | `-to FILE` | target file for move mode |
+| `-with-methods` | a mapped type's methods and `New<T>` constructors follow it (explicit mapping overrides) |
 | `-out DIR` | output directory; defaults to the source file's directory (in-place) |
 | `-dry-run` | print the plan and verification result only, write nothing |
 | `-no-format` | skip the import cleanup |
