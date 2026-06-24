@@ -54,9 +54,9 @@ Delete         write.go
 (*Store).Flush flush.go
 ```
 
-A method (one with a receiver) can be written as the bare name `M` or in a
-qualified form `T.M` / `(*T).M`; when methods of the same name belong to
-different types, use a qualified form to pin it down.
+A method (one with a receiver) has four equivalent forms: the bare name `M`,
+`T.M`, `(T).M`, `(*T).M`; when methods of the same name belong to different
+types, use a qualified form to pin it down.
 
 **Make methods follow their type**: add `-with-methods`, and when you map a
 type, all its methods and its `New<T>` / `new<T>` constructors follow it into

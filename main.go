@@ -25,7 +25,7 @@
 // Mapping file format (one per line, "#" comments allowed):
 //
 //	Get            read.go
-//	(*Store).Flush flush.go          # methods may use Type.Method form
+//	(*Store).Flush flush.go          # methods: M, T.M, (T).M or (*T).M
 //	Set            write.go
 //
 // With -with-methods, mapping a type also pulls its methods and New<T>/new<T>
@@ -422,7 +422,10 @@ func declKeys(d ast.Decl) (keys []string, canonical string) {
 	case *ast.FuncDecl:
 		if v.Recv != nil && len(v.Recv.List) > 0 {
 			recv := recvTypeName(v.Recv.List[0].Type)
-			return []string{recv + "." + v.Name.Name, v.Name.Name}, "(" + recv + ")." + v.Name.Name
+			m := v.Name.Name
+			// Keys ordered most-specific first; canonical stays parenthesized.
+			keys := []string{recv + "." + m, "(" + recv + ")." + m, "(*" + recv + ")." + m, m}
+			return keys, "(" + recv + ")." + m
 		}
 		return []string{v.Name.Name}, v.Name.Name
 	case *ast.GenDecl:

@@ -475,3 +475,25 @@ func TestRenderSuggestion_IsValidMapping(t *testing.T) {
 		}
 	}
 }
+
+func TestSplit_MethodKeyForms(t *testing.T) {
+	// The fixture has `func (t T) M() int`. All four key spellings must match it.
+	for _, key := range []string{"T.M", "(T).M", "(*T).M", "M"} {
+		_, src := writeFixture(t)
+		plan, err := split(src, map[string]string{key: "method.go"}, splitOpts{})
+		if err != nil {
+			t.Fatalf("key %q: split: %v", key, err)
+		}
+		if len(plan.warnings) != 0 {
+			t.Errorf("key %q: unexpected warnings %v", key, plan.warnings)
+		}
+		fo, ok := plan.files["method.go"]
+		if !ok {
+			t.Errorf("key %q: M did not land in method.go", key)
+			continue
+		}
+		if fo.declCount != 1 {
+			t.Errorf("key %q: method.go declCount=%d, want 1", key, fo.declCount)
+		}
+	}
+}
