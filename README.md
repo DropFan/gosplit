@@ -76,6 +76,28 @@ Best for "move these few out, leave the rest in place".
 gosplit -move Set,Delete -to write.go store.go
 ```
 
+### 3. Suggest mode (`-suggest`)
+
+When you don't want to write the list by hand, let gosplit cluster each type
+with its methods and `New<T>` constructors automatically and emit a mapping
+draft (one file per type, named after the type in snake_case):
+
+```bash
+# print the draft; free functions and package-level var/const are marked "stays in source"
+gosplit -suggest store.go
+
+# save it, tweak as needed (rename files, move some method lines elsewhere), then split
+gosplit -suggest store.go > split.txt
+gosplit -map split.txt store.go
+
+# or split directly, skipping the draft
+gosplit -suggest -apply store.go
+```
+
+The draft is expanded declaration by declaration, so a plain `-map` applies it
+and lets you adjust method by method. `-suggest` cannot be combined with `-map`
+/ `-move` / `-with-methods`.
+
 ## Recommended workflow
 
 ```bash
@@ -111,6 +133,8 @@ dry-run: nothing written
 | `-move NAMES` | comma-separated declaration names to move out (with `-to`) |
 | `-to FILE` | target file for move mode |
 | `-with-methods` | a mapped type's methods and `New<T>` constructors follow it (explicit mapping overrides) |
+| `-suggest` | cluster by type and print a mapping draft (writes nothing by default) |
+| `-apply` | with `-suggest`: skip the draft and split directly |
 | `-out DIR` | output directory; defaults to the source file's directory (in-place) |
 | `-dry-run` | print the plan and verification result only, write nothing |
 | `-no-format` | skip the import cleanup |
@@ -136,8 +160,9 @@ dry-run: nothing written
   `-dry-run`.
 - **Build constraints** (`//go:build` tags) are not copied to new files; if the
   source has them, add them to the relevant new files by hand.
-- **Grouped declarations** (`var ( ... )` / `const ( ... )` written together)
-  move as a whole group, mapped by the first name in the group.
+- **Grouped declarations** (`type ( ... )` / `var ( ... )` / `const ( ... )`
+  written together) move as a whole group, mapped by any name in the group;
+  `-suggest` does not split such grouped blocks and leaves them in the remainder.
 - gosplit **only moves, never modifies, and does not build for you**; always
   `go build` + `go test` after splitting.
 - Mapping one declaration to several files is an error (a declaration can only

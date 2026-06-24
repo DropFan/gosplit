@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,6 +299,179 @@ func TestRun_WithMethodsEndToEnd(t *testing.T) {
 	for _, want := range []string{"type Store", "NewStore", "(Store).Get", "(Store).Set"} {
 		if !store[want] {
 			t.Errorf("store.go missing %q (have %v)", want, store)
+		}
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected and returns what it printed.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	return string(out)
+}
+
+func TestRun_SuggestPrintsDraftWritesNothing(t *testing.T) {
+	dir, src := writeMethodsFixture(t)
+	var runErr error
+	out := captureStdout(t, func() { runErr = run([]string{"-suggest", src}) })
+	if runErr != nil {
+		t.Fatalf("run -suggest: %v", runErr)
+	}
+	if !strings.Contains(out, "# Store -> store.go") {
+		t.Errorf("draft not printed:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "store.go")); !os.IsNotExist(err) {
+		t.Errorf("-suggest must not write files, but store.go exists")
+	}
+}
+
+func TestRun_SuggestApplyWritesFiles(t *testing.T) {
+	dir, src := writeMethodsFixture(t)
+	if err := run([]string{"-suggest", "-apply", src}); err != nil {
+		t.Fatalf("run -suggest -apply: %v", err)
+	}
+	storeContent, err := os.ReadFile(filepath.Join(dir, "store.go"))
+	if err != nil {
+		t.Fatalf("store.go not written: %v", err)
+	}
+	store := declNamesIn(t, storeContent)
+	for _, want := range []string{"type Store", "NewStore", "(Store).Get", "(Store).Set"} {
+		if !store[want] {
+			t.Errorf("store.go missing %q (have %v)", want, store)
+		}
+	}
+	srcContent, _ := os.ReadFile(src)
+	if !declNamesIn(t, srcContent)["Helper"] {
+		t.Errorf("Helper should remain in the source file")
+	}
+}
+
+func TestRun_MutualExclusion(t *testing.T) {
+	_, src := writeMethodsFixture(t)
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-suggest", "-map", "x.txt", src}, "cannot be combined"},
+		{[]string{"-suggest", "-move", "Store", "-to", "x.go", src}, "cannot be combined"},
+		{[]string{"-apply", src}, "requires -suggest"},
+		{[]string{"-with-methods", "-suggest", src}, "cannot be combined"},
+	}
+	for _, c := range cases {
+		err := run(c.args)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("run(%v) err = %v, want containing %q", c.args, err, c.want)
+		}
+	}
+}
+
+func TestToSnake(t *testing.T) {
+	cases := map[string]string{
+		"User":       "user",
+		"UserID":     "user_id",
+		"HTTPServer": "http_server",
+		"ID":         "id",
+		"Store":      "store",
+	}
+	for in, want := range cases {
+		if got := toSnake(in); got != want {
+			t.Errorf("toSnake(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSuggestMapping_Clusters(t *testing.T) {
+	_, src := writeMethodsFixture(t)
+	s, err := suggestMapping(src)
+	if err != nil {
+		t.Fatalf("suggestMapping: %v", err)
+	}
+	if len(s.groups) != 1 {
+		t.Fatalf("groups = %d, want 1 (Store)", len(s.groups))
+	}
+	g := s.groups[0]
+	if g.typeName != "Store" || g.file != "store.go" {
+		t.Errorf("group = {%q,%q}, want {Store,store.go}", g.typeName, g.file)
+	}
+	members := map[string]bool{}
+	for _, m := range g.members {
+		members[m] = true
+	}
+	for _, want := range []string{"Store", "Store.Get", "Store.Set", "NewStore"} {
+		if !members[want] {
+			t.Errorf("group members missing %q (have %v)", want, g.members)
+		}
+	}
+	rem := map[string]bool{}
+	for _, r := range s.remainder {
+		rem[r] = true
+	}
+	if !rem["Helper"] {
+		t.Errorf("remainder should contain Helper (have %v)", s.remainder)
+	}
+}
+
+func TestSuggestMapping_AppliesWithPlainMap(t *testing.T) {
+	_, src := writeMethodsFixture(t)
+	s, err := suggestMapping(src)
+	if err != nil {
+		t.Fatalf("suggestMapping: %v", err)
+	}
+	// The expanded mapping must work with plain -map (no -with-methods).
+	plan, err := split(src, s.mapping(), splitOpts{})
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	if !plan.verifyOK {
+		t.Fatalf("verify failed: %s", plan.verifyMsg)
+	}
+	store := declNamesIn(t, plan.files["store.go"].content)
+	for _, want := range []string{"type Store", "NewStore", "(Store).Get", "(Store).Set"} {
+		if !store[want] {
+			t.Errorf("store.go missing %q (have %v)", want, store)
+		}
+	}
+	if !declNamesIn(t, plan.files["foo.go"].content)["Helper"] {
+		t.Errorf("Helper should stay in remainder")
+	}
+}
+
+func TestRenderSuggestion_IsValidMapping(t *testing.T) {
+	_, src := writeMethodsFixture(t)
+	s, err := suggestMapping(src)
+	if err != nil {
+		t.Fatalf("suggestMapping: %v", err)
+	}
+	draft := renderSuggestion(s, "foo.go")
+	if !strings.Contains(draft, "# Store -> store.go") {
+		t.Errorf("draft missing group header:\n%s", draft)
+	}
+	// The draft, saved and re-read as a mapping, must equal s.mapping().
+	dir := t.TempDir()
+	mf := filepath.Join(dir, "draft.txt")
+	if err := os.WriteFile(mf, []byte(draft), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadMapping(mf, "", "")
+	if err != nil {
+		t.Fatalf("loadMapping on draft: %v", err)
+	}
+	want := s.mapping()
+	if len(got) != len(want) {
+		t.Fatalf("round-trip size %d, want %d", len(got), len(want))
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("round-trip[%q] = %q, want %q", k, got[k], v)
 		}
 	}
 }

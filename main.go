@@ -19,6 +19,9 @@
 //	# Move mode: move a few declarations out; the rest stay in source.go.
 //	gosplit -move Set,Delete -to write.go source.go
 //
+//	# Suggest mode: print a per-type mapping draft (-apply to split directly).
+//	gosplit -suggest source.go
+//
 // Mapping file format (one per line, "#" comments allowed):
 //
 //	Get            read.go
@@ -42,6 +45,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"golang.org/x/tools/imports"
 )
@@ -62,9 +66,11 @@ func run(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "print the plan and verification result, write nothing")
 	noFormat := fs.Bool("no-format", false, "do not run goimports-style import cleanup on outputs")
 	withMethods := fs.Bool("with-methods", false, "a mapped type's methods and New<T> constructors follow it")
+	suggest := fs.Bool("suggest", false, "print a per-type mapping draft for the source file")
+	apply := fs.Bool("apply", false, "with -suggest: skip the draft and split directly")
 	verbose := fs.Bool("v", false, "verbose output")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: gosplit [-map FILE | -move NAMES -to FILE] [flags] source.go")
+		fmt.Fprintln(os.Stderr, "usage: gosplit [-map FILE | -move NAMES -to FILE | -suggest [-apply]] [flags] source.go")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -76,11 +82,35 @@ func run(args []string) error {
 	}
 	srcPath := fs.Arg(0)
 
-	mapping, err := loadMapping(*mapFile, *move, *to)
-	if err != nil {
-		return err
+	switch {
+	case *suggest && (*mapFile != "" || *move != ""):
+		return fmt.Errorf("-suggest cannot be combined with -map or -move")
+	case *suggest && *withMethods:
+		return fmt.Errorf("-with-methods cannot be combined with -suggest")
+	case *apply && !*suggest:
+		return fmt.Errorf("-apply requires -suggest")
 	}
+
+	var mapping map[string]string
 	opts := splitOpts{withMethods: *withMethods}
+	if *suggest {
+		s, err := suggestMapping(srcPath)
+		if err != nil {
+			return err
+		}
+		if !*apply {
+			fmt.Print(renderSuggestion(s, filepath.Base(srcPath)))
+			return nil
+		}
+		mapping = s.mapping()
+		opts = splitOpts{} // draft is already expanded; no need to follow methods
+	} else {
+		m, err := loadMapping(*mapFile, *move, *to)
+		if err != nil {
+			return err
+		}
+		mapping = m
+	}
 
 	dir := *outDir
 	if dir == "" {
@@ -513,4 +543,149 @@ func compareMultisets(a, b []string) (bool, string) {
 		parts = append(parts, "duplicated/new: "+strings.Join(extra, ", "))
 	}
 	return false, strings.Join(parts, "; ")
+}
+
+// suggestGroup is one suggested output file: a type plus its methods and
+// New<T>/new<T> constructors, listed as mapping keys.
+type suggestGroup struct {
+	typeName string
+	file     string
+	members  []string // mapping keys: type name, T.M methods, constructor names
+}
+
+// suggestion is a per-type split proposal for a source file.
+type suggestion struct {
+	groups    []suggestGroup
+	remainder []string // canonical names of declarations that stay in the source
+}
+
+// mapping flattens the suggestion into a declName -> targetFile map usable by split.
+func (s *suggestion) mapping() map[string]string {
+	m := map[string]string{}
+	for _, g := range s.groups {
+		for _, k := range g.members {
+			m[k] = g.file
+		}
+	}
+	return m
+}
+
+// suggestMapping analyzes a source file and clusters each single-spec type with
+// its methods and New<T>/new<T> constructors into its own output file. Grouped
+// type blocks, free functions and package-level var/const stay in the remainder.
+func suggestMapping(srcPath string) (*suggestion, error) {
+	src, err := os.ReadFile(srcPath)
+	if err != nil {
+		return nil, err
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, srcPath, src, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+
+	groups := map[string]*suggestGroup{}
+	var typeOrder []string
+	inGroup := map[ast.Decl]bool{}
+
+	// Each single-spec `type T ...` becomes its own cluster.
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE || len(gd.Specs) != 1 {
+			continue
+		}
+		name := gd.Specs[0].(*ast.TypeSpec).Name.Name
+		groups[name] = &suggestGroup{typeName: name, file: toSnake(name) + ".go", members: []string{name}}
+		typeOrder = append(typeOrder, name)
+		inGroup[d] = true
+	}
+
+	// Attach methods and New<T>/new<T> constructors to their type's cluster.
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if fn.Recv != nil && len(fn.Recv.List) > 0 {
+			recv := recvTypeName(fn.Recv.List[0].Type)
+			if g, ok := groups[recv]; ok {
+				g.members = append(g.members, recv+"."+fn.Name.Name)
+				inGroup[d] = true
+			}
+			continue
+		}
+		for _, prefix := range []string{"New", "new"} {
+			if t, ok := strings.CutPrefix(fn.Name.Name, prefix); ok {
+				if g, ok := groups[t]; ok {
+					g.members = append(g.members, fn.Name.Name)
+					inGroup[d] = true
+					break
+				}
+			}
+		}
+	}
+
+	var remainder []string
+	for _, d := range f.Decls {
+		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.IMPORT {
+			continue
+		}
+		if !inGroup[d] {
+			_, canonical := declKeys(d)
+			remainder = append(remainder, canonical)
+		}
+	}
+
+	s := &suggestion{remainder: remainder}
+	for _, name := range typeOrder {
+		s.groups = append(s.groups, *groups[name])
+	}
+	return s, nil
+}
+
+// renderSuggestion formats a suggestion as a mapping draft: each member on its
+// own line grouped by type, with the remainder listed as comments. The output
+// is itself a valid mapping file.
+func renderSuggestion(s *suggestion, srcBase string) string {
+	width := 0
+	for _, g := range s.groups {
+		for _, k := range g.members {
+			if len(k) > width {
+				width = len(k)
+			}
+		}
+	}
+	var b strings.Builder
+	for _, g := range s.groups {
+		fmt.Fprintf(&b, "# %s -> %s\n", g.typeName, g.file)
+		for _, k := range g.members {
+			fmt.Fprintf(&b, "%-*s  %s\n", width, k, g.file)
+		}
+		b.WriteByte('\n')
+	}
+	if len(s.remainder) > 0 {
+		fmt.Fprintf(&b, "# Unassigned (stays in %s):\n", srcBase)
+		for _, name := range s.remainder {
+			fmt.Fprintf(&b, "#   %s\n", name)
+		}
+	}
+	return b.String()
+}
+
+// toSnake converts a CamelCase identifier to snake_case, treating runs of
+// upper-case letters as acronyms (e.g. HTTPServer -> http_server, ID -> id).
+func toSnake(s string) string {
+	rs := []rune(s)
+	var b strings.Builder
+	for i, r := range rs {
+		if i > 0 && unicode.IsUpper(r) {
+			prev := rs[i-1]
+			nextLower := i+1 < len(rs) && unicode.IsLower(rs[i+1])
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextLower) {
+				b.WriteByte('_')
+			}
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
 }
