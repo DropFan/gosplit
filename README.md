@@ -1,5 +1,9 @@
 # gosplit
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/DropFan/gosplit.svg)](https://pkg.go.dev/github.com/DropFan/gosplit)
+[![Go Report Card](https://goreportcard.com/badge/github.com/DropFan/gosplit)](https://goreportcard.com/report/github.com/DropFan/gosplit)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Split a huge Go source file into several smaller files in the same package,
 **byte-for-byte**, following a list of "which declaration goes to which file".
 
@@ -165,3 +169,7 @@ dry-run: nothing written
   `go build` + `go test` after splitting.
 - Mapping one declaration to several files is an error (a declaration can only
   go to one place).
+
+## License
+
+[MIT](LICENSE) © 2026 Tiger
